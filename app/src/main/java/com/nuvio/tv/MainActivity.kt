@@ -16,7 +16,10 @@ import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.gestures.LocalBringIntoViewSpec
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.height
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.DisposableEffect
@@ -575,20 +578,12 @@ class MainActivity : ComponentActivity() {
 
                     // Must start unloaded: ReturnToPickerAfterTimeAway's restored-process invariant.
                     if (hasSeenAuthQrOnFirstLaunch == null) {
-                        Box(
-                            modifier = Modifier
-                                .fillMaxSize()
-                                .background(NuvioTheme.colors.Background)
-                        )
+                        StartupGateWait("reading app settings")
                         return@Surface
                     }
 
                     if (authState is AuthState.Loading) {
-                        Box(
-                            modifier = Modifier
-                                .fillMaxSize()
-                                .background(NuvioTheme.colors.Background)
-                        )
+                        StartupGateWait("checking saved sign-in")
                         return@Surface
                     }
 
@@ -643,11 +638,7 @@ class MainActivity : ComponentActivity() {
                     if (needsProfilePick && (activeProfileHasPin == null || (profileReturnPending && storedProfiles == null))) {
                         // Lock map or active profile (or, for a return, the profile list) still loading:
                         // show neither the picker nor the app yet.
-                        Box(
-                            modifier = Modifier
-                                .fillMaxSize()
-                                .background(NuvioTheme.colors.Background)
-                        )
+                        StartupGateWait("loading profiles")
                         return@Surface
                     }
 
@@ -676,11 +667,7 @@ class MainActivity : ComponentActivity() {
                     }
 
                     if (!mainUiPrefs.loaded) {
-                        Box(
-                            modifier = Modifier
-                                .fillMaxSize()
-                                .background(NuvioTheme.colors.Background)
-                        )
+                        StartupGateWait("loading display settings")
                         return@Surface
                     }
                     val pendingDeepLink by pendingDeepLinkUrl.collectAsState()
@@ -1309,6 +1296,35 @@ private fun ReturnToPickerOnWake(
 private fun StartupMarkWhen(ready: Boolean, name: String) {
     if (ready) {
         LaunchedEffect(Unit) { StartupLatencyTrace.markOnce(name) }
+    }
+}
+
+/**
+ * The start gate's wait screen. The gates used to render an empty background, so a start that
+ * never got past them showed as a plain blank screen with nothing to go on; now it names the
+ * step it is waiting for (and the backend it will talk to).
+ */
+@Composable
+private fun StartupGateWait(step: String) {
+    Box(
+        modifier = Modifier.fillMaxSize().background(NuvioTheme.colors.Background),
+        contentAlignment = Alignment.Center
+    ) {
+        Column(horizontalAlignment = Alignment.CenterHorizontally) {
+            com.nuvio.tv.ui.components.LoadingIndicator()
+            Spacer(Modifier.height(NuvioTheme.spacing.lg))
+            Text(
+                text = "Starting Nuvio KE — $step",
+                style = NuvioTheme.textStyles.bodyHome,
+                color = NuvioTheme.colors.TextSecondary
+            )
+            Spacer(Modifier.height(NuvioTheme.spacing.sm))
+            Text(
+                text = BuildConfig.SUPABASE_URL.removePrefix("https://").removeSuffix("/"),
+                style = NuvioTheme.textStyles.bodyHome,
+                color = NuvioTheme.colors.TextTertiary
+            )
+        }
     }
 }
 

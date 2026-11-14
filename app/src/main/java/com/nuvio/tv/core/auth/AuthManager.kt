@@ -46,6 +46,8 @@ import javax.inject.Singleton
 import javax.net.ssl.SSLException
 
 private const val TAG = "AuthManager"
+/** How long the start gate may wait for a session restore before it renders as SignedOut. */
+private const val AUTH_LOADING_TIMEOUT_MS = 20_000L
 private const val AUTH_ENDPOINT_PASSWORD = "/auth/v1/token?grant_type=password"
 private const val AUTH_ENDPOINT_REFRESH = "/auth/v1/token?grant_type=refresh_token"
 private const val AUTH_ENDPOINT_START_TV_LOGIN = "/rest/v1/rpc/start_tv_login_session"
@@ -90,6 +92,24 @@ class AuthManager @Inject constructor(
 
     init {
         observeSessionStatus()
+        loadingWatchdog()
+    }
+
+    /**
+     * A session restore that never answers (a backend the TV cannot reach, a stalled connect)
+     * would leave [AuthState.Loading] up forever, and the start gate renders a blank screen while
+     * Loading. After [AUTH_LOADING_TIMEOUT_MS] fall back to SignedOut: the start gate then shows
+     * the sign-in screen. The session itself is untouched — a late restore still emits
+     * Authenticated and flips the app back to the account.
+     */
+    private fun loadingWatchdog() {
+        scope.launch {
+            delay(AUTH_LOADING_TIMEOUT_MS)
+            if (_authState.value is AuthState.Loading) {
+                Log.w(TAG, "Auth still Loading after ${AUTH_LOADING_TIMEOUT_MS}ms; falling back to SignedOut so the start gate can render")
+                _authState.value = AuthState.SignedOut
+            }
+        }
     }
 
     private fun observeSessionStatus() {
