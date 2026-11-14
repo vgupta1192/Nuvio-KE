@@ -94,16 +94,9 @@ jobs:
           SHOULD=true
           if [ "${{ github.event_name }}" = "schedule" ] && [ "${{ steps.sync.outputs.merged }}" = "false" ]; then
             HEAD_SHA=$(git rev-parse HEAD)
-            LAST=$(gh release list --repo vgupta1192/Nuvio-KE --limit 5 --json body 2>/dev/null \
-              | python3 -c "
-import json,sys
-sha = '$HEAD_SHA'
-try:
-    rels = json.load(sys.stdin)
-except Exception:
-    rels = []
-print('yes' if any(('source-sha: ' + sha) in (r.get('body') or '') for r in rels) else 'no')" 2>/dev/null || echo no)
-            if [ "$LAST" = "yes" ]; then
+            LAST=$(gh api "repos/vgupta1192/Nuvio-KE/releases?per_page=5" --jq '.[].body' 2>/dev/null \
+              | grep -F "source-sha: $HEAD_SHA" || true)
+            if [ -n "$LAST" ]; then
               echo "HEAD already released; scheduled run skipping"
               SHOULD=false
             fi
