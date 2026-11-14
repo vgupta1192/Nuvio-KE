@@ -41,7 +41,8 @@ data class UpdateFeed(
             supported = updateCheckSupported(
                 builtInTmdbKey = BuildConfig.TMDB_API_KEY,
                 debugBuild = BuildConfig.IS_DEBUG_BUILD,
-                applicationId = BuildConfig.APPLICATION_ID
+                applicationId = BuildConfig.APPLICATION_ID,
+                forkBuild = BuildConfig.FORK_BUILD
             ),
             owner = BuildConfig.UPDATE_OWNER,
             repo = BuildConfig.UPDATE_REPO,
@@ -387,7 +388,14 @@ class UpdateController internal constructor(
         }
     }
 
-    private fun KnownRelease.isNewer(): Boolean = versionCode > feed.installedCode
+    /**
+     * Fork builds of the same versionCode still order by run number: a rebuilt fork release with
+     * new fork features is offered even before upstream bumps the version. Upstream-style assets
+     * carry forkBuild 0, so they only win on a higher versionCode.
+     */
+    private fun KnownRelease.isNewer(): Boolean =
+        versionCode > feed.installedCode ||
+            (versionCode == feed.installedCode && forkBuild > BuildConfig.FORK_BUILD)
 
     private suspend fun check(): CheckOutcome {
         loadedRecord()

@@ -107,4 +107,27 @@ class UpdateReleaseTest {
         assertFalse(updateCheckSupported("", debugBuild = true, applicationId = "com.nuvio.tv.ke"))
         assertFalse(updateCheckSupported("", debugBuild = false, applicationId = "com.nuvio.tv.ke.debug"))
     }
+
+    @Test
+    fun `fork builds check despite the baked key and plain builds do not`() {
+        assertTrue(updateCheckSupported("0123abcd", debugBuild = false, applicationId = "com.nuvio.tv.ke", forkBuild = 12))
+        assertFalse(updateCheckSupported("0123abcd", debugBuild = false, applicationId = "com.nuvio.tv.ke", forkBuild = 0))
+        assertFalse(updateCheckSupported("0123abcd", debugBuild = true, applicationId = "com.nuvio.tv.ke", forkBuild = 12))
+    }
+
+    @Test
+    fun `fork run naming parses and a rebuilt run wins over the same code`() {
+        val fork = "NuvioKE-1.1.1-1423-b12-armeabi-v7a.apk"
+        val offer = releaseOffer(release(asset(fork)), listOf("armeabi-v7a"))!!
+        assertEquals("1.1.1", offer.versionName)
+        assertEquals(1423, offer.versionCode)
+        assertEquals(12, offer.forkBuild)
+        // Same code, higher run: the rebuild wins the asset pick.
+        val newer = releaseOffer(release(asset(fork), asset("NuvioKE-1.1.1-1423-b7-armeabi-v7a.apk")), listOf("armeabi-v7a"))!!
+        assertEquals(12, newer.forkBuild)
+        // A hyphenated upstream versionName still splits unambiguously.
+        val upstream = releaseOffer(release(asset(v7a)), listOf("armeabi-v7a"))!!
+        assertEquals(0, upstream.forkBuild)
+        assertNull(releaseOffer(release(asset("NuvioKE-1.1.1-1423-b12b-armeabi-v7a.apk")), listOf("armeabi-v7a")))
+    }
 }

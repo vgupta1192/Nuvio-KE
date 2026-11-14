@@ -13,6 +13,7 @@ enum class AspectMode(@param:StringRes val labelResId: Int) {
     ORIGINAL(R.string.player_aspect_fit),
     FULL_SCREEN(R.string.player_aspect_crop),
     STRETCH(R.string.player_aspect_stretch),
+    CUSTOM_STRETCH(R.string.player_aspect_custom_stretch),
     SLIGHT_ZOOM(R.string.player_aspect_mode_slight_zoom),
     CINEMA_ZOOM(R.string.player_aspect_mode_cinema_zoom),
     VERTICAL_STRETCH(R.string.player_aspect_fit_height),
@@ -34,6 +35,7 @@ internal fun aspectModeNeedsVideoAspect(mode: AspectMode): Boolean {
     return when (mode) {
         AspectMode.FULL_SCREEN,
         AspectMode.STRETCH,
+        AspectMode.CUSTOM_STRETCH,
         AspectMode.VERTICAL_STRETCH,
         AspectMode.HORIZONTAL_STRETCH -> true
 
@@ -80,7 +82,8 @@ internal fun resolveAspectScale(mode: AspectMode, viewAspect: Float, videoAspect
             AspectScale(scaleX = uniformScale, scaleY = uniformScale)
         }
 
-        AspectMode.STRETCH -> {
+        AspectMode.STRETCH,
+        AspectMode.CUSTOM_STRETCH -> {
             val safeVideoAspect = videoAspect?.takeIf { it > 0f }
                 ?: return AspectScale(scaleX = 1.0f, scaleY = 1.0f)
             if (safeVideoAspect > viewAspect) {
@@ -131,7 +134,33 @@ internal fun applyExoAspectMode(playerView: PlayerView, mode: AspectMode) {
 
     applyAspectScale(targetView, mode, viewAspect, videoAspect)
     centerTargetInPlayer(playerView, targetView)
+    if (mode == AspectMode.CUSTOM_STRETCH && targetView !== playerView) {
+        (playerView.getTag(R.id.player_view_custom_stretch_tag) as? VideoContentRect)
+            ?.let { applyCustomStretchRect(targetView, it) }
+    }
 }
+
+/**
+ * Custom Stretch on top of the plain stretch: the target view shows the whole frame and
+ * already covers the player, so scale it once more so the picture area covers the player.
+ */
+private fun applyCustomStretchRect(targetView: View, rect: VideoContentRect) {
+    if (rect.width <= 0f || rect.height <= 0f || targetView.width <= 0 || targetView.height <= 0) return
+    val scaleX = targetView.scaleX / rect.width
+    val scaleY = targetView.scaleY / rect.height
+    targetView.scaleX = scaleX
+    targetView.scaleY = scaleY
+    targetView.translationX -= ((rect.left + rect.right) / 2f - 0.5f) * targetView.width * scaleX
+    targetView.translationY -= ((rect.top + rect.bottom) / 2f - 0.5f) * targetView.height * scaleY
+}
+
+/** Picture area found by Custom Stretch for this player view (null = whole frame). */
+internal fun setExoCustomStretchRect(playerView: PlayerView, rect: VideoContentRect?) {
+    playerView.setTag(R.id.player_view_custom_stretch_tag, rect)
+}
+
+/** The surface ExoPlayer renders into; captures of it are not affected by view transforms. */
+internal fun exoVideoSurfaceView(playerView: PlayerView): View? = resolveVideoSurfaceView(playerView)
 
 internal fun addExoAspectLayoutChangeListener(
     playerView: PlayerView,

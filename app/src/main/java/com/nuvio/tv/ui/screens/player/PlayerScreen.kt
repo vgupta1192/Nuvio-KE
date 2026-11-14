@@ -105,6 +105,9 @@ import com.nuvio.tv.domain.model.Subtitle
 import com.nuvio.tv.domain.model.WatchProgress
 import com.nuvio.tv.ui.components.LoadingIndicator
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.isActive
+import kotlinx.coroutines.suspendCancellableCoroutine
+import kotlin.coroutines.resume
 import kotlinx.coroutines.launch
 import androidx.compose.ui.platform.LocalLayoutDirection
 import androidx.compose.ui.unit.LayoutDirection
@@ -118,6 +121,14 @@ import com.nuvio.tv.ui.components.sources.SourcesPanelSheet
 import com.nuvio.tv.ui.components.sources.StreamSourcesPanel
 import com.nuvio.tv.ui.components.rememberRawSvgPainter
 import com.nuvio.tv.core.player.AspectMode
+import com.nuvio.tv.core.player.BarSample
+import com.nuvio.tv.core.player.BlackBarTracker
+import com.nuvio.tv.core.player.CustomStretchMemory
+import com.nuvio.tv.core.player.VideoContentRect
+import com.nuvio.tv.core.player.captureVideoLuma
+import com.nuvio.tv.core.player.detectContent
+import com.nuvio.tv.core.player.exoVideoSurfaceView
+import com.nuvio.tv.core.player.setExoCustomStretchRect
 import com.nuvio.tv.core.player.FailoverNotice
 import com.nuvio.tv.core.player.triedFor
 import com.nuvio.tv.core.player.NuvioMpvSurfaceView
@@ -1939,6 +1950,47 @@ private fun MpvPlayerSurface(
         mpvView.applyAspectMode(aspectMode)
     }
 
+    // Custom Stretch: sample frames, find the black bars baked into the video and stretch only
+    // the picture area (mpv does the crop+stretch itself, see NuvioMpvSurfaceView).
+    LaunchedEffect(mpvView, aspectMode) {
+        mpvView.setCustomStretchContent(null)
+        if (aspectMode != AspectMode.CUSTOM_STRETCH) return@LaunchedEffect
+        val tracker = BlackBarTracker()
+        var generation = mpvView.mediaGeneration
+        var memoryKey = mpvView.currentMediaUrl()
+        CustomStretchMemory.get(memoryKey)?.let {
+            tracker.seed(it)
+            mpvView.setCustomStretchContent(it)
+        }
+        delay(BlackBarTracker.FIRST_SAMPLE_DELAY_MS)
+        while (isActive) {
+            if (mpvView.mediaGeneration != generation) {
+                generation = mpvView.mediaGeneration
+                tracker.reset()
+                memoryKey = mpvView.currentMediaUrl()
+                val remembered = CustomStretchMemory.get(memoryKey)
+                remembered?.let(tracker::seed)
+                mpvView.setCustomStretchContent(remembered)
+            }
+            // mpv crops to the picture, so a wider scene is invisible to the sampler: look at the
+            // whole frame now and then.
+            val peek = tracker.shouldPeek
+            if (peek) {
+                tracker.notePeek()
+                mpvView.setCustomStretchContent(null)
+                delay(BlackBarTracker.PEEK_SETTLE_MS)
+            }
+            val sample = suspendCancellableCoroutine<BarSample?> { continuation ->
+                mpvView.sampleCustomStretchContent { if (continuation.isActive) continuation.resume(it) }
+            }
+            val changed = tracker.offer(sample)
+            if (peek) mpvView.setCustomStretchContent(changed ?: tracker.current)
+            else changed?.let(mpvView::setCustomStretchContent)
+            if (changed != null) CustomStretchMemory.put(memoryKey, changed)
+            delay(tracker.nextIntervalMs)
+        }
+    }
+
     LaunchedEffect(mpvView, subtitleStyle) {
         mpvView.applySubtitleStyle(subtitleStyle)
     }
@@ -2066,6 +2118,41 @@ private fun ExoPlayerSurface(
 
     LaunchedEffect(playerView, aspectMode) {
         playerView.applyExoAspectMode(aspectMode)
+    }
+
+    // Custom Stretch: sample frames, find the black bars baked into the video and stretch only
+    // the picture area over the whole screen.
+    LaunchedEffect(playerView, player, aspectMode) {
+        fun applyRect(rect: VideoContentRect?) {
+            setExoCustomStretchRect(playerView, rect)
+            playerView.post { playerView.applyExoAspectMode(aspectMode) }
+        }
+        applyRect(null)
+        if (aspectMode != AspectMode.CUSTOM_STRETCH) return@LaunchedEffect
+        val tracker = BlackBarTracker()
+        var mediaItem = player.currentMediaItem
+        var memoryKey = mediaItem?.localConfiguration?.uri?.toString()
+        CustomStretchMemory.get(memoryKey)?.let {
+            tracker.seed(it)
+            applyRect(it)
+        }
+        delay(BlackBarTracker.FIRST_SAMPLE_DELAY_MS)
+        while (isActive) {
+            if (player.currentMediaItem !== mediaItem) {
+                mediaItem = player.currentMediaItem
+                tracker.reset()
+                memoryKey = mediaItem?.localConfiguration?.uri?.toString()
+                val remembered = CustomStretchMemory.get(memoryKey)
+                remembered?.let(tracker::seed)
+                applyRect(remembered)
+            }
+            val sample = exoVideoSurfaceView(playerView)?.captureVideoLuma()?.detectContent()
+            tracker.offer(sample)?.let {
+                applyRect(it)
+                CustomStretchMemory.put(memoryKey, it)
+            }
+            delay(tracker.nextIntervalMs)
+        }
     }
 
     LaunchedEffect(playerView, player, useLibass, libassRenderType) {

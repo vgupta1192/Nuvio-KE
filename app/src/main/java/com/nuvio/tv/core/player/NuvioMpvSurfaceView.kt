@@ -78,6 +78,9 @@ class NuvioMpvSurfaceView @JvmOverloads constructor(
 
     fun setMedia(url: String, headers: Map<String, String>, startPositionMs: Long = 0L) {
         ensureInitialized()
+        // URL of the stream last requested, the key under which Custom Stretch remembers its result.
+        requestedMediaUrl = url
+        mediaGeneration++
         val requestKey = buildMediaRequestKey(url = url, headers = headers) +
             "#start=${startPositionMs.coerceAtLeast(0L)}"
         if (hasQueuedInitialMedia && requestKey == lastMediaRequestKey) {
@@ -371,6 +374,68 @@ class NuvioMpvSurfaceView @JvmOverloads constructor(
         applyAspectModeInternal(mode, allowRetry = true)
     }
 
+    /** URL of the stream last requested, the key under which Custom Stretch remembers its result. */
+    fun currentMediaUrl(): String? = requestedMediaUrl ?: pendingInitialMediaUrl
+
+    /** Changes with every media request, so Custom Stretch can start over for a new stream. */
+    var mediaGeneration = 0L
+        private set
+    private var requestedMediaUrl: String? = null
+    private var customStretchRect: VideoContentRect? = null
+    /** Picture area mpv currently crops to (null = whole frame), as last applied. */
+    private var appliedCustomStretchRect: VideoContentRect? = null
+    private var appliedVideoCrop = ""
+    private var customStretchPropsApplied = false
+
+    /** Picture area for Custom Stretch (null = stretch the whole frame). */
+    internal fun setCustomStretchContent(rect: VideoContentRect?) {
+        customStretchRect = rect
+        if (currentAspectMode == AspectMode.CUSTOM_STRETCH) applyCustomStretchProps(active = true)
+    }
+
+    /**
+     * Picture area of the current frame, from a capture of the rendered surface. The capture
+     * shows the current crop and mpv's subtitles, so it is mapped back to frame fractions and
+     * made symmetric (a subtitle drawn inside the bottom bar must not count as picture).
+     * The surface is captured instead of mpv's decoded frame because direct hardware decoding
+     * cannot hand frames out.
+     */
+    internal fun sampleCustomStretchContent(onResult: (BarSample?) -> Unit) {
+        if (!initialized) {
+            onResult(null)
+            return
+        }
+        // The crop needs the source size, so it is retried on every sample until mpv knows it.
+        if (currentAspectMode == AspectMode.CUSTOM_STRETCH) applyCustomStretchProps(active = true)
+        val crop = appliedCustomStretchRect
+        captureVideoLuma { frame ->
+            onResult(frame?.detectContent()?.symmetric()?.mapFromCrop(crop))
+        }
+    }
+
+    /**
+     * Custom Stretch runs inside mpv instead of scaling the view, so mpv keeps subtitles inside
+     * the visible picture: keepaspect=no stretches the frame over the view and video-crop drops
+     * the bars first (mpv ignores video-zoom/scale/pan when keepaspect is off).
+     */
+    private fun applyCustomStretchProps(active: Boolean) {
+        if (!initialized || (!active && !customStretchPropsApplied)) return
+        val rect = if (active) customStretchRect else null
+        runCatching {
+            val crop = rect.toMpvVideoCrop(
+                mpv.getPropertyInt("video-params/w") ?: 0,
+                mpv.getPropertyInt("video-params/h") ?: 0,
+            )
+            mpv.setPropertyString("keepaspect", if (active) "no" else "yes")
+            if (crop != appliedVideoCrop) {
+                mpv.setPropertyString("video-crop", crop)
+                appliedVideoCrop = crop
+            }
+            appliedCustomStretchRect = if (crop.isEmpty()) null else rect
+        }.onFailure { Log.w(TAG, "Failed to apply custom stretch: ${it.message}") }
+        customStretchPropsApplied = active
+    }
+
     override fun onSizeChanged(w: Int, h: Int, oldw: Int, oldh: Int) {
         super.onSizeChanged(w, h, oldw, oldh)
         if (w == oldw && h == oldh) return
@@ -382,6 +447,13 @@ class NuvioMpvSurfaceView @JvmOverloads constructor(
     }
 
     private fun applyAspectModeInternal(mode: AspectMode, allowRetry: Boolean) {
+        if (mode == AspectMode.CUSTOM_STRETCH) {
+            scaleX = 1.0f
+            scaleY = 1.0f
+            applyCustomStretchProps(active = true)
+            return
+        }
+        applyCustomStretchProps(active = false)
         val viewAspect = readViewAspectRatio(width, height)
         val videoAspect = readVideoAspectRatio()
         val scale = resolveAspectScale(
@@ -679,6 +751,9 @@ class NuvioMpvSurfaceView @JvmOverloads constructor(
         playbackRestarted.set(false)
         stopped = false
         initialized = false
+        customStretchPropsApplied = false
+        appliedVideoCrop = ""
+        appliedCustomStretchRect = null
         hasQueuedInitialMedia = false
         lastMediaRequestKey = null
         pendingInitialMediaUrl = null

@@ -79,6 +79,10 @@ import javax.inject.Inject
 
 private const val TAG = "StreamScreenViewModel"
 private const val DIRECT_AUTOPLAY_HARD_TIMEOUT_MS = 60_000L
+// Stream auto refresh: every 10 s the addons are asked again while the sources screen is open,
+// and links that were not there before are added to the list (no spinner, no focus reset).
+private const val AUTO_REFRESH_INTERVAL_MS = 10_000L
+private const val AUTO_REFRESH_TIMEOUT_MS = 45_000L
 
 @HiltViewModel
 class StreamScreenViewModel @Inject constructor(
@@ -113,6 +117,8 @@ class StreamScreenViewModel @Inject constructor(
     private var streamLoadJob: Job? = null
     private var streamLoadScope: kotlinx.coroutines.CoroutineScope? = null
     private var streamLoadCompleted = false
+    // Stream auto refresh: the last load's addon order, reused when a refresh round adds links.
+    private var installedAddonOrder: List<String> = emptyList()
     // Retry repeats the last load's kind: after a failed Refresh, a plain reload would keep
     // isLoading false over the stale allStreams and flash the empty message before results.
     private var lastLoadForcedRefresh = false
@@ -354,6 +360,104 @@ class StreamScreenViewModel @Inject constructor(
         }
         loadMetaDetails()
         loadStreams()
+        startAutoRefresh()
+    }
+
+    /**
+     * While the sources screen is open, asks every addon again every few seconds and adds links
+     * that were not there before. Keeps going during playback and auto-play; a failed round keeps
+     * the list as it is and the next round tries again.
+     */
+    private fun startAutoRefresh() {
+        viewModelScope.launch {
+            while (true) {
+                delay(AUTO_REFRESH_INTERVAL_MS)
+                val idle = streamLoadCompleted
+                if (!idle) {
+                    updateUiStateIfChanged { it.copy(autoRefreshPhase = 0) }
+                    continue
+                }
+                updateUiStateIfChanged { it.copy(autoRefreshPhase = 1) }
+                var roundOk = false
+                var roundAdded = 0
+                try {
+                    roundOk = kotlinx.coroutines.withTimeoutOrNull(AUTO_REFRESH_TIMEOUT_MS) {
+                        streamRepository.getStreamsFromAllAddons(
+                            type = contentType,
+                            videoId = streamRequestId,
+                            season = season,
+                            episode = episode,
+                            forceRefresh = true
+                        ).collect { result ->
+                            if (result is NetworkResult.Success) roundAdded += mergeRefreshedStreams(result.data)
+                        }
+                        true
+                    } == true
+                } catch (cancelled: kotlinx.coroutines.CancellationException) {
+                    throw cancelled
+                } catch (_: Exception) {
+                    // A failed refresh keeps the list as it is; the next round tries again.
+                }
+                updateUiStateIfChanged {
+                    it.copy(
+                        autoRefreshPhase = 2,
+                        autoRefreshRounds = it.autoRefreshRounds + 1,
+                        // Rounds in a row that added no links; lives in the state so it survives a
+                        // visit to the player. New links start it over.
+                        autoRefreshDryRounds = if (roundAdded > 0) 0 else it.autoRefreshDryRounds + 1,
+                        // Never more than the list holds: the count is net growth since the screen opened.
+                        autoRefreshAdded = (it.autoRefreshAdded + roundAdded).coerceAtMost(it.allStreams.size),
+                        autoRefreshLastAtMs = System.currentTimeMillis(),
+                        autoRefreshLastOk = roundOk
+                    )
+                }
+            }
+        }
+    }
+
+    /** Merges one refresh round's results into the list. Returns how many links were new to it. */
+    private fun mergeRefreshedStreams(fresh: List<AddonStreams>): Int {
+        val current = _uiState.value
+        val byName = LinkedHashMap<String, AddonStreams>()
+        current.addonStreams.forEach { byName[it.addonName] = it }
+        var changed = false
+        var added = 0
+        val badged = current.allStreams.filter { it.badges.isNotEmpty() }.associateBy { it.limitKey() }
+        fresh.forEach { group ->
+            if (group.streams.isEmpty()) return@forEach
+            val old = byName[group.addonName]
+            val newKeys = group.streams.map { it.limitKey() }.toSet()
+            val oldKeys = old?.streams?.map { it.limitKey() }?.toSet().orEmpty()
+            // Take the new list only when it holds something new and does not lose links.
+            if (old == null || (newKeys.size >= oldKeys.size && newKeys != oldKeys)) {
+                byName[group.addonName] = group.copy(
+                    streams = group.streams.map { stream ->
+                        val known = badged[stream.limitKey()]
+                        if (known != null && stream.badges.isEmpty()) stream.copy(badges = known.badges) else stream
+                    }
+                )
+                changed = true
+                added += newKeys.count { it !in oldKeys }
+            }
+        }
+        if (!changed) return 0
+        val groups = byName.values.toList().let {
+            StreamAutoPlaySelector.orderAddonStreams(it, installedAddonOrder)
+        }
+        val allStreams = groups.flatMap { it.streams }
+        updateUiStateIfChanged {
+            it.copy(
+                addonStreams = groups,
+                allStreams = allStreams,
+                availableAddons = groups.map { g -> g.addonName },
+                sourceChips = mergeSourceChipStatuses(
+                    existing = it.sourceChips,
+                    succeededNames = groups.map { g -> g.addonName }
+                )
+            ).withListView(hiddenVerdictsFor(allStreams, it.runtime))
+        }
+        scheduleStreamBadgePresentation(groups)
+        return added
     }
 
     private fun SavedStateHandle.getOptionalString(key: String): String? {
@@ -600,6 +704,8 @@ class StreamScreenViewModel @Inject constructor(
                     "preScrapeTotal=${SystemClock.elapsedRealtime() - loadSplitT0}ms"
             )
             val installedAddonOrder = installedAddons.map { it.displayName }
+            // Stream auto refresh merges later rounds under this same order.
+            this@StreamScreenViewModel.installedAddonOrder = installedAddonOrder
             val persistedBingeGroup = AutoPlaySelection.persistedBingeGroup(
                 playerSettings, contentId, bingeGroupCacheDataStore::get
             )

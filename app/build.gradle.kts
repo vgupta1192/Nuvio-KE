@@ -73,6 +73,11 @@ fun truthy(value: String?): Boolean {
 
 val buildingAppBundle = gradle.startParameter.taskNames.any { it.contains("bundle", ignoreCase = true) }
 val useDebugReleaseSigning = env("CI_USE_DEBUG_SIGNING").equals("true", ignoreCase = true)
+// Fork builds: the CI run that produced the APK (in-app updater compares run numbers so two
+// builds of one versionCode still order). 0 = not a CI fork build (upstream semantics).
+val forkBuild = (env("FORK_BUILD")
+    ?: localProperties.getProperty("FORK_BUILD")
+    ?: "0").trim().toIntOrNull() ?: 0
 val useLocalFfmpegDecoder = truthy(
     providers.gradleProperty("useLocalFfmpegDecoder").orNull
         ?: env("USE_LOCAL_FFMPEG_DECODER")
@@ -118,8 +123,9 @@ android {
         buildConfigField("String", "TMDB_API_KEY", "\"$builtInTmdbKey\"")
         // Update check feed (Spec 52 P6): the public repo's GitHub Releases; checked only by a build
         // without a TMDB key (core/update/UpdateRelease.kt updateCheckSupported).
-        buildConfigField("String", "UPDATE_OWNER", buildConfigString(localProperties.getProperty("UPDATE_OWNER").takeUnless { it.isNullOrBlank() } ?: "Arshad-Kamal"))
+        buildConfigField("String", "UPDATE_OWNER", buildConfigString(localProperties.getProperty("UPDATE_OWNER").takeUnless { it.isNullOrBlank() } ?: "vgupta1192"))
         buildConfigField("String", "UPDATE_REPO", buildConfigString(localProperties.getProperty("UPDATE_REPO").takeUnless { it.isNullOrBlank() } ?: "Nuvio-KE"))
+        buildConfigField("int", "FORK_BUILD", forkBuild.toString())
         buildConfigField("String", "TV_LOGIN_WEB_BASE_URL", "\"${localProperties.getProperty("TV_LOGIN_WEB_BASE_URL", "https://nuvio.tv/tv-login")}\"")
         buildConfigField("boolean", "DOVI_NATIVE_ENABLED", enableDoviNative.toString())
         buildConfigField("boolean", "DOVI_EXTRACTOR_HOOK_READY", doviExtractorHookReady.toString())

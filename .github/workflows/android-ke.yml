@@ -1,0 +1,203 @@
+name: Build Nuvio KE (fork release + upstream sync)
+
+# Fork of Arshad-Kamal/Nuvio-KE (vgupta1192). One workflow does everything:
+#   1. Sync: merge upstream main into the fork's main (schedule, dispatch, and also on every
+#      push so main stays current before a build).
+#   2. Build: assembleFullRelease signed with the fork keystore, against the fork's self-hosted
+#      backend (nuviobackend.kissmissi.duckdns.org) instead of the official one.
+#   3. Release: tag ke-<upstream tag>-b<run>, assets NuvioKE-<ver>-<code>-<abi>.apk — exactly the
+#      names the in-app updater's ASSET_NAME regex parses (core/update/UpdateRelease.kt).
+#
+# Schedule caveat: GitHub drops cron runs for hours at a time; a missed window catches up on the
+# next run or via workflow_dispatch.
+
+on:
+  push:
+    branches: [main]
+  schedule:
+    - cron: "*/30 * * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: build-nuvio-ke
+  cancel-in-progress: false
+
+env:
+  UPSTREAM_REPO: Arshad-Kamal/Nuvio-KE
+  UPSTREAM_BRANCH: main
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout fork (full history for the merge)
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          lfs: true
+
+      - name: Sync upstream
+        id: sync
+        run: |
+          git config user.name "nuvio-ke-sync"
+          git config user.email "nuvio-ke-sync@users.noreply.github.com"
+          git remote add upstream "https://github.com/${UPSTREAM_REPO}.git"
+          git fetch upstream "$UPSTREAM_BRANCH" --no-tags
+          UP_SHA=$(git rev-parse "FETCH_HEAD")
+          echo "upstream_head=$UP_SHA" >> "$GITHUB_OUTPUT"
+          if git merge-base --is-ancestor "$UP_SHA" HEAD; then
+            echo "merged=false" >> "$GITHUB_OUTPUT"
+            echo "upstream ${UP_SHA:0:12} already contained in HEAD"
+          else
+            git merge --no-edit "$UP_SHA" -m "Sync upstream ${UP_SHA:0:12} (Arshad-Kamal/Nuvio-KE)"
+            git push origin HEAD:main
+            echo "merged=true" >> "$GITHUB_OUTPUT"
+            echo "merged upstream ${UP_SHA:0:12}"
+          fi
+
+      - name: Check upstream release + already-built gate
+        id: ver
+        env:
+          GH_TOKEN: ${{ github.token }}
+          HEAD_MSG: ${{ github.event.head_commit.message }}
+        run: |
+          # Newest non-draft upstream release (prereleases included): /releases/latest skips
+          # prereleases, and Nuvio KE ships betas only as prereleases.
+          REL=$(curl -sf -H "Authorization: Bearer $GH_TOKEN" \
+            "https://api.github.com/repos/${UPSTREAM_REPO}/releases?per_page=10" \
+            | python3 -c "import json,sys;r=[x for x in json.load(sys.stdin) if not x.get('draft')];r.sort(key=lambda x:x.get('published_at') or '',reverse=True);print(json.dumps(r[0]) if r else '')")
+          if [ -n "$REL" ]; then
+            UPTAG=$(printf '%s' "$REL" | python3 -c "import json,sys;print(json.load(sys.stdin)['tag_name'])")
+            {
+              echo 'notes<<GHR_NOTES_EOF'
+              printf 'Fork CI build of upstream %s.\n\n' "$UPTAG"
+              printf '%s' "$REL" | python3 -c "import json,sys;print(json.load(sys.stdin).get('body') or '(no upstream release notes)')"
+              echo 'GHR_NOTES_EOF'
+            } >> "$GITHUB_OUTPUT"
+          else
+            UPTAG=""
+            printf 'Fork CI build of upstream %s main (no upstream release yet).\n' "$UPSTREAM_REPO" >> "$GITHUB_OUTPUT"
+          fi
+          echo "uptag=$UPTAG" >> "$GITHUB_OUTPUT"
+
+          VER=$(grep -E '^\s*versionName\s*=' app/build.gradle.kts | sed -E 's/.*"([^"]+)".*/\1/')
+          CODE=$(grep -E '^\s*versionCode\s*=' app/build.gradle.kts | sed -E 's/.*=\s*([0-9]+).*/\1/')
+          echo "ver=$VER" >> "$GITHUB_OUTPUT"
+          echo "code=$CODE" >> "$GITHUB_OUTPUT"
+          echo "upstream tag: ${UPTAG:-none} (version $VER/$CODE)"
+
+          # Scheduled no-op: nothing was merged and HEAD is already released. Pushes and
+          # workflow_dispatch always build.
+          SHOULD=true
+          if [ "${{ github.event_name }}" = "schedule" ] && [ "${{ steps.sync.outputs.merged }}" = "false" ]; then
+            HEAD_SHA=$(git rev-parse HEAD)
+            LAST=$(gh release list --repo vgupta1192/Nuvio-KE --limit 5 --json body 2>/dev/null \
+              | python3 -c "
+import json,sys
+sha = '$HEAD_SHA'
+try:
+    rels = json.load(sys.stdin)
+except Exception:
+    rels = []
+print('yes' if any(('source-sha: ' + sha) in (r.get('body') or '') for r in rels) else 'no')" 2>/dev/null || echo no)
+            if [ "$LAST" = "yes" ]; then
+              echo "HEAD already released; scheduled run skipping"
+              SHOULD=false
+            fi
+          fi
+          echo "should_build=$SHOULD" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/setup-java@v4
+        if: steps.ver.outputs.should_build == 'true'
+        with:
+          distribution: temurin
+          java-version: '21'
+          cache: gradle
+
+      - name: Fetch CI signing keystore (from secret)
+        if: steps.ver.outputs.should_build == 'true'
+        env:
+          KS_B64: ${{ secrets.TV_KEYSTORE_B64 }}
+        run: |
+          printf '%s' "$KS_B64" | base64 -d > "$GITHUB_WORKSPACE/nuvioke.jks"
+          test -s "$GITHUB_WORKSPACE/nuvioke.jks"
+
+      - name: Create local.properties (self-hosted backend)
+        if: steps.ver.outputs.should_build == 'true'
+        env:
+          NUVIO_SUPABASE_ANON_KEY: ${{ secrets.NUVIO_SUPABASE_ANON_KEY }}
+          TMDB_API_KEY: ${{ secrets.TMDB_API_KEY }}
+        run: |
+          cat > local.properties <<LOCAL_EOF
+          sdk.dir=${ANDROID_HOME:-/usr/local/lib/android/sdk}
+          NUVIO_SUPABASE_URL=https://nuviobackend.kissmissi.duckdns.org
+          NUVIO_SUPABASE_ANON_KEY=${NUVIO_SUPABASE_ANON_KEY}
+          NUVIO_SUPABASE_FALLBACK_URL=
+          TMDB_API_KEY=${TMDB_API_KEY}
+          FORK_BUILD=${{ github.run_number }}
+          UPDATE_OWNER=vgupta1192
+          UPDATE_REPO=Nuvio-KE
+          TV_LOGIN_WEB_BASE_URL=https://nuvioweb.kissmissi.duckdns.org/tv-login
+          AVATAR_PUBLIC_BASE_URL=https://nuviobackend.kissmissi.duckdns.org/storage/v1/object/public/avatars
+          LOCAL_EOF
+
+      - name: Build release APKs (full flavor, ABI splits)
+        if: steps.ver.outputs.should_build == 'true'
+        env:
+          NUVIO_RELEASE_STORE_FILE: ${{ github.workspace }}/nuvioke.jks
+          NUVIO_RELEASE_STORE_PASSWORD: ${{ secrets.TV_KEYSTORE_PASSWORD }}
+          NUVIO_RELEASE_KEY_PASSWORD: ${{ secrets.TV_KEYSTORE_PASSWORD }}
+          NUVIO_RELEASE_KEY_ALIAS: ${{ secrets.TV_KEY_ALIAS }}
+        run: |
+          ./gradlew :app:assembleFullRelease
+          ls -la app/build/outputs/apk/full/release/
+
+      - name: Rename release assets
+        if: steps.ver.outputs.should_build == 'true'
+        id: assets
+        run: |
+          VER="${{ steps.ver.outputs.ver }}"
+          CODE="${{ steps.ver.outputs.code }}"
+          RUN="${{ github.run_number }}"
+          DIR=app/build/outputs/apk/full/release
+          mkdir -p dist
+          # The -b<run> name is what the fork updater parses (UpdateRelease.parseAssetName) so two
+          # builds of one versionCode still order by run number.
+          for ABI in arm64-v8a armeabi-v7a; do
+            SRC=$(ls "$DIR"/*-"$ABI"-release.apk 2>/dev/null | head -1)
+            if [ -z "$SRC" ]; then SRC=$(ls "$DIR"/*"$ABI"*.apk 2>/dev/null | head -1); fi
+            test -n "$SRC" || { echo "::error::no APK for $ABI"; ls "$DIR"; exit 1; }
+            DEST="dist/NuvioKE-${VER}-${CODE}-b${RUN}-${ABI}.apk"
+            cp "$SRC" "$DEST"
+            echo "asset: $DEST"
+          done
+          ls -la dist/
+
+      - name: Create release
+        if: steps.ver.outputs.should_build == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          VER="${{ steps.ver.outputs.ver }}"
+          UPTAG="${{ steps.ver.outputs.uptag }}"
+          RUN="${{ github.run_number }}"
+          if [ -n "$UPTAG" ]; then TAG="ke-${UPTAG}-b${RUN}"; else TAG="ke-b${RUN}"; fi
+          if echo "$TAG" | grep -qiE 'beta|alpha|rc'; then PRERE="--prerelease"; else PRERE=""; fi
+          BUILT_SHA=$(git rev-parse HEAD)
+          {
+            echo "Nuvio KE ${VER} (build ${RUN}, upstream ${UPTAG:-main})"
+            echo ""
+            cat <<'FORK_EOF'
+          Fork features: self-hosted backend (nuviobackend.kissmissi.duckdns.org), Custom Stretch
+          aspect mode, streams-page auto refresh with live status line, automatic upstream sync.
+
+          ---
+          FORK_EOF
+            printf 'source-sha: %s\n' "$BUILT_SHA"
+          } > body.md
+          cat "${{ steps.ver.outputs.notes }}" >> body.md 2>/dev/null || true
+          gh release create "$TAG" dist/*.apk --title "Nuvio KE ${VER} (b${RUN})" --notes-file body.md $PRERE
+          echo "release tag: $TAG"

@@ -51,7 +51,15 @@ data class StreamScreenUiState(
     /** The show's preferred source (Spec 65 P6); [listView] lists its matches first. */
     val preferredSource: PreferredSource? = null,
     /** The failure store's entries under a day old (Spec 75 S6): the rows' failure marks. */
-    val recentFailures: RecentFailures = RecentFailures.EMPTY
+    val recentFailures: RecentFailures = RecentFailures.EMPTY,
+    // Stream auto refresh status: 0 waiting for the first load, 1 checking the addons now, 2 idle.
+    val autoRefreshPhase: Int = 0,
+    val autoRefreshRounds: Int = 0,
+    val autoRefreshAdded: Int = 0,
+    /** Rounds in a row that added no links; five in a row hide the status line again. */
+    val autoRefreshDryRounds: Int = 0,
+    val autoRefreshLastAtMs: Long = 0L,
+    val autoRefreshLastOk: Boolean = true
 ) {
     /** The rows the list shows. */
     val filteredStreams: List<Stream> get() = listView.streams

@@ -321,6 +321,20 @@ fun StreamScreen(
                     }
                     markFor
                 }
+                // The auto refresh status line sits above the sources panel and says the addons
+                // are being asked again (it hides itself once it has nothing new to report).
+                StreamAutoRefreshStatus(
+                    phase = uiState.autoRefreshPhase,
+                    rounds = uiState.autoRefreshRounds,
+                    added = uiState.autoRefreshAdded,
+                    dryRounds = uiState.autoRefreshDryRounds,
+                    lastAtMs = uiState.autoRefreshLastAtMs,
+                    lastOk = uiState.autoRefreshLastOk,
+                    manualLoading = uiState.isLoading,
+                    modifier = Modifier
+                        .align(Alignment.TopEnd)
+                        .padding(marquee.stream.panelInset)
+                )
                 StreamSourcesPanel(
                     isLoading = uiState.isLoading,
                     error = uiState.error,
