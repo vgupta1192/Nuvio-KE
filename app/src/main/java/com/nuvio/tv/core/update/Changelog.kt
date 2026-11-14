@@ -98,15 +98,14 @@ internal fun splitReleaseBody(body: String): ReleaseBodyParts {
 /** [release] as a changelog entry; null for a draft or a pre-release (the update check never offers those). */
 internal fun changelogRelease(release: GitHubReleaseDto): ChangelogRelease? {
     if (release.draft || release.prerelease) return null
-    val apk = release.assets.firstNotNullOfOrNull { asset -> asset.name?.let { ASSET_NAME.matchEntire(it) } }
+    val apk = release.assets.firstNotNullOfOrNull { asset -> asset.name?.let { parseAssetName(it) } }
     val title = release.name?.takeIf { it.isNotBlank() } ?: release.tagName?.takeIf { it.isNotBlank() }
-    val versionName = apk?.groupValues?.get(1)
-    if (versionName == null && title == null) return null
+    if (apk == null && title == null) return null
     val parts = splitReleaseBody(release.body.orEmpty().take(MAX_NOTES_CHARS))
     return ChangelogRelease(
-        title = title ?: versionName.orEmpty(),
-        versionName = versionName,
-        versionCode = apk?.groupValues?.get(2)?.toIntOrNull(),
+        title = title ?: apk?.versionName.orEmpty(),
+        versionName = apk?.versionName,
+        versionCode = apk?.versionCode,
         publishedAt = release.publishedAt,
         whatsNew = parts.whatsNew,
         notes = parts.notes,

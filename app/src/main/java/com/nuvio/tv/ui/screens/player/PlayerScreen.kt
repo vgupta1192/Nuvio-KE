@@ -126,7 +126,6 @@ import com.nuvio.tv.core.player.BlackBarTracker
 import com.nuvio.tv.core.player.CustomStretchMemory
 import com.nuvio.tv.core.player.VideoContentRect
 import com.nuvio.tv.core.player.captureVideoLuma
-import com.nuvio.tv.core.player.detectContent
 import com.nuvio.tv.core.player.exoVideoSurfaceView
 import com.nuvio.tv.core.player.setExoCustomStretchRect
 import com.nuvio.tv.core.player.FailoverNotice
