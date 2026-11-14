@@ -192,5 +192,7 @@ jobs:
             printf 'source-sha: %s\n' "$BUILT_SHA"
           } > body.md
           cat "${{ steps.ver.outputs.notes }}" >> body.md 2>/dev/null || true
-          gh release create "$TAG" dist/*.apk --title "Nuvio KE ${VER} (b${RUN})" --notes-file body.md $PRERE
+          # --repo pinned: the job checked out with an "upstream" remote too, and gh would
+          # otherwise resolve the release target to Arshad-Kamal/Nuvio-KE (403 for this token).
+          gh release create "$TAG" dist/*.apk --repo vgupta1192/Nuvio-KE --title "Nuvio KE ${VER} (b${RUN})" --notes-file body.md $PRERE
           echo "release tag: $TAG"
