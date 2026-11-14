@@ -137,7 +137,7 @@ jobs:
           AVATAR_PUBLIC_BASE_URL=https://nuviobackend.kissmissi.duckdns.org/storage/v1/object/public/avatars
           LOCAL_EOF
 
-      - name: Build release APKs (full flavor, ABI splits)
+      - name: Build release APK (armeabi-v7a only)
         if: steps.ver.outputs.should_build == 'true'
         env:
           NUVIO_RELEASE_STORE_FILE: ${{ github.workspace }}/nuvioke.jks
@@ -145,10 +145,12 @@ jobs:
           NUVIO_RELEASE_KEY_PASSWORD: ${{ secrets.TV_KEYSTORE_PASSWORD }}
           NUVIO_RELEASE_KEY_ALIAS: ${{ secrets.TV_KEY_ALIAS }}
         run: |
-          ./gradlew :app:assembleFullRelease
+          # The build's splits block honors -Pnuvio.genAbi=<abi> to narrow the split
+          # (W6.3); the fork ships the 32-bit TV APK only.
+          ./gradlew :app:assembleFullRelease -Pnuvio.genAbi=armeabi-v7a
           ls -la app/build/outputs/apk/full/release/
 
-      - name: Rename release assets
+      - name: Rename release asset
         if: steps.ver.outputs.should_build == 'true'
         id: assets
         run: |
@@ -159,14 +161,13 @@ jobs:
           mkdir -p dist
           # The -b<run> name is what the fork updater parses (UpdateRelease.parseAssetName) so two
           # builds of one versionCode still order by run number.
-          for ABI in arm64-v8a armeabi-v7a; do
-            SRC=$(ls "$DIR"/*-"$ABI"-release.apk 2>/dev/null | head -1)
-            if [ -z "$SRC" ]; then SRC=$(ls "$DIR"/*"$ABI"*.apk 2>/dev/null | head -1); fi
-            test -n "$SRC" || { echo "::error::no APK for $ABI"; ls "$DIR"; exit 1; }
-            DEST="dist/NuvioKE-${VER}-${CODE}-b${RUN}-${ABI}.apk"
-            cp "$SRC" "$DEST"
-            echo "asset: $DEST"
-          done
+          ABI=armeabi-v7a
+          SRC=$(ls "$DIR"/*-"$ABI"-release.apk 2>/dev/null | head -1)
+          test -n "$SRC" || { echo "::error::no APK for $ABI"; ls "$DIR"; exit 1; }
+          DEST="dist/NuvioKE-${VER}-${CODE}-b${RUN}-${ABI}.apk"
+          cp "$SRC" "$DEST"
+          echo "asset: $DEST"
+          unzip -t "$DEST" > /dev/null
           ls -la dist/
 
       - name: Create release
