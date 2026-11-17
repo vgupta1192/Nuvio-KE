@@ -130,4 +130,33 @@ class UpdateReleaseTest {
         assertEquals(0, upstream.forkBuild)
         assertNull(releaseOffer(release(asset("NuvioKE-1.1.1-1423-b12b-armeabi-v7a.apk")), listOf("armeabi-v7a")))
     }
+
+    // --- Spec 89 D5: Get test releases ---
+
+    private fun named(code: Int, prerelease: Boolean = false, draft: Boolean = false) = GitHubReleaseDto(
+        name = "r$code", prerelease = prerelease, draft = draft,
+        assets = listOf(asset("NuvioKE-1.2.0-$code-armeabi-v7a.apk"))
+    )
+
+    @Test
+    fun `the newest offer is the highest versionCode, drafts skipped, a published release wins a tie`() {
+        val abis = listOf("armeabi-v7a")
+        val offer = newestOffer(listOf(named(1431, draft = true), named(1430, prerelease = true), named(1423)), abis)!!
+        assertEquals(1430, offer.versionCode)
+        assertTrue(offer.prerelease)
+        assertFalse(newestOffer(listOf(named(1430, prerelease = true), named(1430)), abis)!!.prerelease)
+        assertFalse(releaseOffer(named(1423), abis)!!.prerelease)
+        assertNull(newestOffer(emptyList(), abis))
+        assertNull(newestOffer(listOf(named(1431, draft = true)), abis))
+    }
+
+    @Test
+    fun `the list outcome maps like the latest one`() {
+        val abis = listOf("armeabi-v7a")
+        assertEquals(1430, (listCheckOutcome(200, listOf(named(1430, prerelease = true)), abis) as CheckOutcome.Answered).offer?.versionCode)
+        assertEquals(CheckOutcome.Answered(null), listCheckOutcome(200, emptyList(), abis))
+        assertEquals(CheckOutcome.NoRelease, listCheckOutcome(404, null, abis))
+        assertEquals(CheckOutcome.Failed, listCheckOutcome(403, null, abis))
+        assertEquals(CheckOutcome.Failed, listCheckOutcome(200, null, abis))
+    }
 }
